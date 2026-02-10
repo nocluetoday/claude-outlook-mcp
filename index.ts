@@ -7,6 +7,8 @@ import {
   type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 import { runAppleScript } from 'run-applescript';
+import fs from "node:fs";
+import path from "node:path";
 
 // ====================================================
 // 1. Tool Definitions
@@ -172,6 +174,68 @@ const server = new Server(
 // 3. Core Functions
 // ====================================================
 
+function escapeAppleScriptString(input: string): string {
+  return input
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, "")
+    .replace(/\n/g, "\\n");
+}
+
+function isPathUnderRoot(root: string, target: string): boolean {
+  const rel = path.relative(root, target);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+async function validateAttachments(attachments?: string[]): Promise<string[]> {
+  if (!attachments || attachments.length === 0) return [];
+
+  const roots = (process.env.ALLOWED_ATTACHMENT_ROOTS || "")
+    .split(":")
+    .map(r => r.trim())
+    .filter(Boolean);
+
+  const allowedRoots = roots.length > 0 ? roots : [process.cwd()];
+  const maxBytes = Number.parseInt(process.env.MAX_ATTACHMENT_BYTES || "10485760", 10);
+
+  const validated: string[] = [];
+
+  for (const rawPath of attachments) {
+    const absPath = path.resolve(process.cwd(), rawPath);
+    const realPath = await fs.promises.realpath(absPath).catch(() => absPath);
+
+    let stats: fs.Stats;
+    try {
+      stats = await fs.promises.stat(realPath);
+    } catch (err: any) {
+      throw new Error(`Attachment not accessible: ${realPath}. ${err?.message || String(err)}`);
+    }
+
+    if (!stats.isFile()) {
+      throw new Error(`Attachment is not a file: ${realPath}`);
+    }
+
+    if (Number.isFinite(maxBytes) && stats.size > maxBytes) {
+      throw new Error(`Attachment too large (${stats.size} bytes): ${realPath}`);
+    }
+
+    const allowed = allowedRoots.some(root => {
+      const rootAbs = path.resolve(process.cwd(), root);
+      return isPathUnderRoot(rootAbs, realPath);
+    });
+
+    if (!allowed) {
+      throw new Error(
+        `Attachment path not allowed: ${realPath}. Allowed roots: ${allowedRoots.join(", ")}`
+      );
+    }
+
+    validated.push(realPath);
+  }
+
+  return validated;
+}
+
 // Check if Outlook is installed and running
 async function checkOutlookAccess(): Promise<boolean> {
   console.error("[checkOutlookAccess] Checking if Outlook is accessible...");
@@ -228,12 +292,23 @@ async function checkOutlookAccess(): Promise<boolean> {
 async function getUnreadEmails(folder: string = "Inbox", limit: number = 10): Promise<any[]> {
   console.error(`[getUnreadEmails] Getting unread emails from folder: ${folder}, limit: ${limit}`);
   await checkOutlookAccess();
-  
-  const folderPath = folder === "Inbox" ? "inbox" : folder;
+
+  const escapedFolder = escapeAppleScriptString(folder);
   const script = `
     tell application "Microsoft Outlook"
       try
-        set theFolder to ${folderPath} -- Use the specified folder or default to inbox
+        set theFolder to inbox
+        try
+          set allFolders to mail folders
+          repeat with mailFolder in allFolders
+            if name of mailFolder is "${escapedFolder}" then
+              set theFolder to mailFolder
+              exit repeat
+            end if
+          end repeat
+        on error
+          -- Fallback to inbox on lookup errors
+        end try
         set unreadMessages to {}
         set allMessages to messages of theFolder
         set i to 0
@@ -327,16 +402,28 @@ async function getUnreadEmails(folder: string = "Inbox", limit: number = 10): Pr
 async function searchEmails(searchTerm: string, folder: string = "Inbox", limit: number = 10): Promise<any[]> {
   console.error(`[searchEmails] Searching for "${searchTerm}" in folder: ${folder}, limit: ${limit}`);
   await checkOutlookAccess();
-  
-  const folderPath = folder === "Inbox" ? "inbox" : folder;
+
+  const escapedFolder = escapeAppleScriptString(folder);
+  const escapedSearch = escapeAppleScriptString(searchTerm);
   const script = `
     tell application "Microsoft Outlook"
       try
-        set theFolder to ${folderPath}
+        set theFolder to inbox
+        try
+          set allFolders to mail folders
+          repeat with mailFolder in allFolders
+            if name of mailFolder is "${escapedFolder}" then
+              set theFolder to mailFolder
+              exit repeat
+            end if
+          end repeat
+        on error
+          -- Fallback to inbox on lookup errors
+        end try
         set searchResults to {}
         set allMessages to messages of theFolder
         set i to 0
-        set searchString to "${searchTerm.replace(/"/g, '\\"')}"
+        set searchString to "${escapedSearch}"
         
         repeat with theMessage in allMessages
           if (subject of theMessage contains searchString) or (content of theMessage contains searchString) then
@@ -432,14 +519,9 @@ async function checkAttachmentPath(filePath: string): Promise<string> {
     }
     
     // Check if the file exists and is readable
-    const fs = require('fs');
-    const { promisify } = require('util');
-    const access = promisify(fs.access);
-    const stat = promisify(fs.stat);
-    
     try {
-      await access(fullPath, fs.constants.R_OK);
-      const stats = await stat(fullPath);
+      await fs.promises.access(fullPath, fs.constants.R_OK);
+      const stats = await fs.promises.stat(fullPath);
       
       return `File exists and is readable: ${fullPath}\nSize: ${stats.size} bytes\nPermissions: ${stats.mode.toString(8)}\nLast modified: ${stats.mtime}`;
     } catch (err) {
@@ -460,10 +542,15 @@ async function debugSendEmailWithAttachment(
   // First check if the file exists and is readable
   const fileStatus = await checkAttachmentPath(attachmentPath);
   console.error(`[debugSendEmail] Attachment status: ${fileStatus}`);
-  
+
+  const escapedAttachment = escapeAppleScriptString(attachmentPath);
+  const escapedSubject = escapeAppleScriptString(subject);
+  const escapedBody = escapeAppleScriptString(body);
+  const escapedTo = escapeAppleScriptString(to);
+
   // Create a simple AppleScript that just attempts to open the file
   const script = `
-    set theFile to POSIX file "${attachmentPath.replace(/"/g, '\\"')}"
+    set theFile to POSIX file "${escapedAttachment}"
     try
       tell application "Finder"
         set fileExists to exists file theFile
@@ -483,12 +570,12 @@ async function debugSendEmailWithAttachment(
     const emailScript = `
       tell application "Microsoft Outlook"
         try
-          set newMessage to make new outgoing message with properties {subject:"DEBUG: ${subject.replace(/"/g, '\\"')}", visible:true}
-          set content of newMessage to "${body.replace(/"/g, '\\"')}"
-          set to recipients of newMessage to {"${to}"}
+          set newMessage to make new outgoing message with properties {subject:"DEBUG: ${escapedSubject}", visible:true}
+          set content of newMessage to "${escapedBody}"
+          set to recipients of newMessage to {"${escapedTo}"}
           
           try
-            set attachmentFile to POSIX file "${attachmentPath.replace(/"/g, '\\"')}"
+            set attachmentFile to POSIX file "${escapedAttachment}"
             make new attachment at newMessage with properties {file:attachmentFile}
             set attachResult to "Successfully attached file"
           on error attachErrMsg
@@ -526,6 +613,8 @@ async function sendEmail(
   
   await checkOutlookAccess();
 
+  const validatedAttachments = await validateAttachments(attachments);
+
   // Extract name from email if possible (for display name)
   const extractNameFromEmail = (email: string): string => {
     const namePart = email.split('@')[0];
@@ -541,28 +630,26 @@ async function sendEmail(
   const bccName = bcc ? extractNameFromEmail(bcc) : "";
 
   // Escape special characters
-  const escapedSubject = subject.replace(/"/g, '\\"');
-  const escapedBody = body.replace(/"/g, '\\"').replace(/\n/g, '\\n');
+  const escapedSubject = escapeAppleScriptString(subject);
+  const escapedBody = escapeAppleScriptString(body);
+  const escapedTo = escapeAppleScriptString(to);
+  const escapedCc = cc ? escapeAppleScriptString(cc) : "";
+  const escapedBcc = bcc ? escapeAppleScriptString(bcc) : "";
+  const escapedToName = escapeAppleScriptString(toName);
+  const escapedCcName = escapeAppleScriptString(ccName);
+  const escapedBccName = escapeAppleScriptString(bccName);
   
   // Process attachments: Convert to absolute paths if they are relative
   let processedAttachments: string[] = [];
-  if (attachments && attachments.length > 0) {
-    processedAttachments = attachments.map(path => {
-      // Check if path is absolute (starts with /)
-      if (path.startsWith('/')) {
-        return path;
-      }
-      // Get current working directory and join with relative path
-      const cwd = process.cwd();
-      return `${cwd}/${path}`;
-    });
+  if (validatedAttachments.length > 0) {
+    processedAttachments = validatedAttachments;
     console.error(`[sendEmail] Processed attachments: ${JSON.stringify(processedAttachments)}`);
   }
   
   // Create attachment script part with better error handling
   const attachmentScript = processedAttachments.length > 0 
     ? processedAttachments.map(filePath => {
-      const escapedPath = filePath.replace(/"/g, '\\"');
+      const escapedPath = escapeAppleScriptString(filePath);
       return `
         try
           set attachmentFile to POSIX file "${escapedPath}"
@@ -590,9 +677,9 @@ async function sendEmail(
           }
           
           tell msg
-            set recipTo to make new to recipient with properties {email address:{name:"${toName}", address:"${to}"}}
-            ${cc ? `set recipCc to make new cc recipient with properties {email address:{name:"${ccName}", address:"${cc}"}}` : ''}
-            ${bcc ? `set recipBcc to make new bcc recipient with properties {email address:{name:"${bccName}", address:"${bcc}"}}` : ''}
+            set recipTo to make new to recipient with properties {email address:{name:"${escapedToName}", address:"${escapedTo}"}}
+            ${cc ? `set recipCc to make new cc recipient with properties {email address:{name:"${escapedCcName}", address:"${escapedCc}"}}` : ''}
+            ${bcc ? `set recipBcc to make new bcc recipient with properties {email address:{name:"${escapedBccName}", address:"${escapedBcc}"}}` : ''}
             
             ${attachmentScript}
           end tell
@@ -636,12 +723,12 @@ async function sendEmail(
               `set content of theMessage to "${escapedBody}"`
             }
             
-            set to recipients of theMessage to {"${to}"}
-            ${cc ? `set cc recipients of theMessage to {"${cc}"}` : ''}
-            ${bcc ? `set bcc recipients of theMessage to {"${bcc}"}` : ''}
+            set to recipients of theMessage to {"${escapedTo}"}
+            ${cc ? `set cc recipients of theMessage to {"${escapedCc}"}` : ''}
+            ${bcc ? `set bcc recipients of theMessage to {"${escapedBcc}"}` : ''}
             
             ${processedAttachments.map(filePath => {
-              const escapedPath = filePath.replace(/"/g, '\\"');
+              const escapedPath = escapeAppleScriptString(filePath);
               return `
                 try
                   set attachmentFile to POSIX file "${escapedPath}"
@@ -690,12 +777,12 @@ async function sendEmail(
                 `set content of newMessage to "${escapedBody}"`
               }
               
-              set to recipients of newMessage to {"${to}"}
-              ${cc ? `set cc recipients of newMessage to {"${cc}"}` : ''}
-              ${bcc ? `set bcc recipients of newMessage to {"${bcc}"}` : ''}
+              set to recipients of newMessage to {"${escapedTo}"}
+              ${cc ? `set cc recipients of newMessage to {"${escapedCc}"}` : ''}
+              ${bcc ? `set bcc recipients of newMessage to {"${escapedBcc}"}` : ''}
               
               ${processedAttachments.map(filePath => {
-                const escapedPath = filePath.replace(/"/g, '\\"');
+                const escapedPath = escapeAppleScriptString(filePath);
                 return `
                   try
                     set attachmentFile to POSIX file "${escapedPath}"
@@ -764,6 +851,8 @@ async function getMailFolders(): Promise<string[]> {
 async function readEmails(folder: string = "Inbox", limit: number = 10): Promise<any[]> {
     console.error(`[readEmails] Reading emails from folder: ${folder}, limit: ${limit}`);
     await checkOutlookAccess();
+
+    const escapedFolder = escapeAppleScriptString(folder);
     
     // Use a simplified approach that should be more compatible
     const script = `
@@ -773,7 +862,7 @@ async function readEmails(folder: string = "Inbox", limit: number = 10): Promise
           set targetFolder to null
           set allFolders to mail folders
           repeat with mailFolder in allFolders
-            if name of mailFolder is "${folder}" then
+            if name of mailFolder is "${escapedFolder}" then
               set targetFolder to mailFolder
               exit repeat
             end if
@@ -1011,6 +1100,8 @@ async function getUpcomingEvents(days: number = 7, limit: number = 10): Promise<
 async function searchEvents(searchTerm: string, limit: number = 10): Promise<any[]> {
   console.error(`[searchEvents] Searching for events with term: "${searchTerm}", limit: ${limit}`);
   await checkOutlookAccess();
+
+  const escapedSearch = escapeAppleScriptString(searchTerm);
   
   const script = `
     tell application "Microsoft Outlook"
@@ -1018,7 +1109,7 @@ async function searchEvents(searchTerm: string, limit: number = 10): Promise<any
       set theCalendar to default calendar
       set allEvents to events of theCalendar
       set i to 0
-      set searchString to "${searchTerm.replace(/"/g, '\\"')}"
+      set searchString to "${escapedSearch}"
       
       repeat with theEvent in allEvents
         if (subject of theEvent contains searchString) or (location of theEvent contains searchString) then
@@ -1102,9 +1193,9 @@ async function createEvent(subject: string, start: string, end: string, location
   const formattedEnd = `date "${endDate.getMonth() + 1}/${endDate.getDate()}/${endDate.getFullYear()} ${endDate.getHours()}:${endDate.getMinutes()}:${endDate.getSeconds()}"`;
   
   // Escape strings for AppleScript
-  const escapedSubject = subject.replace(/"/g, '\\"');
-  const escapedLocation = location ? location.replace(/"/g, '\\"') : "";
-  const escapedBody = body ? body.replace(/"/g, '\\"') : "";
+  const escapedSubject = escapeAppleScriptString(subject);
+  const escapedLocation = location ? escapeAppleScriptString(location) : "";
+  const escapedBody = body ? escapeAppleScriptString(body) : "";
   
   let script = `
     tell application "Microsoft Outlook"
@@ -1128,7 +1219,7 @@ async function createEvent(subject: string, start: string, end: string, location
     const attendeeList = attendees.split(',').map(email => email.trim());
     
     for (const attendee of attendeeList) {
-      const escapedAttendee = attendee.replace(/"/g, '\\"');
+      const escapedAttendee = escapeAppleScriptString(attendee);
       script += `
         make new attendee at newEvent with properties {email address:"${escapedAttendee}"}
       `;
@@ -1303,13 +1394,15 @@ async function listContacts(limit: number = 20): Promise<any[]> {
 async function searchContacts(searchTerm: string, limit: number = 10): Promise<any[]> {
     console.error(`[searchContacts] Searching for contacts with term: "${searchTerm}", limit: ${limit}`);
     await checkOutlookAccess();
+
+    const escapedSearch = escapeAppleScriptString(searchTerm);
     
     const script = `
       tell application "Microsoft Outlook"
         set searchResults to {}
         set allContacts to contacts
         set i to 0
-        set searchString to "${searchTerm.replace(/"/g, '\\"')}"
+        set searchString to "${escapedSearch}"
         
         repeat with theContact in allContacts
           try

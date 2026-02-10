@@ -36,7 +36,7 @@ This is a Model Context Protocol (MCP) tool that allows Claude to interact with 
 1. Clone this repository:
 
 ```bash
-git clone https://github.com/syedazharmbnr1/claude-outlook-mcp.git
+git clone https://github.com/nocluetoday/claude-outlook-mcp.git
 cd claude-outlook-mcp
 ```
 
@@ -154,6 +154,20 @@ For best results with attachments:
 - Make sure the files are accessible to the process running the MCP tool
 - Attachments will automatically be handled with robust error detection
 
+#### Attachment Security Controls
+
+Attachments are restricted to reduce accidental data exfiltration:
+
+- `ALLOWED_ATTACHMENT_ROOTS` (optional): colon-separated list of allowed root directories. Defaults to the current working directory if unset.
+- `MAX_ATTACHMENT_BYTES` (optional): maximum allowed file size in bytes. Defaults to 10 MB.
+
+Example:
+
+```bash
+export ALLOWED_ATTACHMENT_ROOTS="/Users/YOURUSERNAME/Documents:/Users/YOURUSERNAME/Downloads"
+export MAX_ATTACHMENT_BYTES=10485760
+```
+
 ## Troubleshooting
 
 If you encounter issues with attachments:
@@ -192,4 +206,4 @@ Update your claude_desktop_config.json to point to the new location.
 
 ## License
 
-MIT
+MIT. See `LICENSE`.
