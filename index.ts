@@ -956,7 +956,7 @@ async function getTodayEvents(limit: number = 10): Promise<any[]> {
         set theEvent to item i of eventList
         set eventData to {subject:subject of theEvent, ¬
                      start:start time of theEvent, ¬
-                     end:end time of theEvent, ¬
+                     endTime:end time of theEvent, ¬
                      location:location of theEvent, ¬
                      id:id of theEvent}
         
@@ -994,7 +994,7 @@ async function getTodayEvents(limit: number = 10): Promise<any[]> {
             events.push({
               subject: event.subject,
               start: event.start,
-              end: event.end,
+              end: event.endTime || event.end,
               location: event.location || "No location",
               id: event.id
             });
@@ -1039,7 +1039,7 @@ async function getUpcomingEvents(days: number = 7, limit: number = 10): Promise<
         set theEvent to item i of eventList
         set eventData to {subject:subject of theEvent, ¬
                      start:start time of theEvent, ¬
-                     end:end time of theEvent, ¬
+                     endTime:end time of theEvent, ¬
                      location:location of theEvent, ¬
                      id:id of theEvent}
         
@@ -1077,7 +1077,7 @@ async function getUpcomingEvents(days: number = 7, limit: number = 10): Promise<
             events.push({
               subject: event.subject,
               start: event.start,
-              end: event.end,
+              end: event.endTime || event.end,
               location: event.location || "No location",
               id: event.id
             });
@@ -1116,7 +1116,7 @@ async function searchEvents(searchTerm: string, limit: number = 10): Promise<any
           set i to i + 1
           set eventData to {subject:subject of theEvent, ¬
                        start:start time of theEvent, ¬
-                       end:end time of theEvent, ¬
+                       endTime:end time of theEvent, ¬
                        location:location of theEvent, ¬
                        id:id of theEvent}
           
@@ -1160,7 +1160,7 @@ async function searchEvents(searchTerm: string, limit: number = 10): Promise<any
             events.push({
               subject: event.subject,
               start: event.start,
-              end: event.end,
+              end: event.endTime || event.end,
               location: event.location || "No location",
               id: event.id
             });
